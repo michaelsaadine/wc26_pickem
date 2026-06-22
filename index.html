@@ -287,78 +287,82 @@ async function loadAll() {
 }
 
 async function fetchSportsAndInterpret() {
-  // Call Claude to fetch and interpret current World Cup standings
   const allTeams = Object.values(OWNERS).flat();
 
-  const prompt = `You have access to current FIFA World Cup 2026 data. Today is ${new Date().toDateString()}.
+  const prompt = `Today is ${new Date().toDateString()}. You are tracking the FIFA World Cup 2026.
 
-The tournament uses a 12-group format with 4 teams per group. Top 2 from each group advance automatically. The best 8 third-place teams also advance to the Round of 32.
-
-For each of the following teams, determine their current tournament status based on what you know about the 2026 World Cup results so far:
+Search for current World Cup 2026 standings and results, then return data for these teams:
 ${allTeams.join(', ')}
 
-Also provide the recent/upcoming match scores you know about.
+Return ONLY a JSON object. No prose, no markdown fences, no explanation. The JSON must be complete and valid.
 
-Respond ONLY with a valid JSON object, no markdown, no explanation:
-{
-  "teams": {
-    "TeamName": {
-      "stage": "none|group_1st|group_2nd|group_3rd_adv|group_3rd_elim|r32|r16|qf|sf|final|champion",
-      "group": "A",
-      "group_pts": 0,
-      "notes": "brief status note"
-    }
-  },
-  "games": [
-    {"home": "TeamA", "away": "TeamB", "score": "2-1", "status": "final|live|upcoming", "time": "Jun 22"}
-  ],
-  "tournament_note": "brief overall status"
-}
+Use these exact stage values:
+- "none" = group stage incomplete
+- "group_1st" = finished 1st in group (eliminated)
+- "group_2nd" = finished 2nd in group (eliminated)  
+- "group_3rd_adv" = finished 3rd, advanced as best 3rd
+- "group_3rd_elim" = finished 3rd, eliminated
+- "r32" = in/reached round of 32
+- "r16" = in/reached round of 16
+- "qf" = in/reached quarterfinals
+- "sf" = in/reached semifinals
+- "final" = in/reached the final
+- "champion" = won the tournament
 
-Stage definitions:
-- none: group stage not yet started or no results
-- group_1st: finished 1st in group
-- group_2nd: finished 2nd in group  
-- group_3rd_adv: finished 3rd but advanced as best 3rd place
-- group_3rd_elim: finished 3rd and eliminated
-- r32: in round of 32 (advanced from group, results pending or lost)
-- r16 through champion: reached that knockout round
-
-If a team is still in their group stage with games remaining, use "none" for stage.
-If group stage is complete for their group, assign appropriate group_1st/2nd/3rd stage.
-If eliminated in knockout, keep their last achieved knockout stage.`;
+JSON format:
+{"teams":{"Spain":{"stage":"none","notes":"1W 0D 0L"},"France":{"stage":"none","notes":""},...},"games":[{"home":"Spain","away":"Morocco","score":"2-0","status":"final"},...],"tournament_note":"Group stage ongoing"}`;
 
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': API_KEY,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true'
+    },
     body: JSON.stringify({
       model: 'claude-sonnet-4-6',
-      max_tokens: 3000,
+      max_tokens: 8000,
       tools: [{ type: 'web_search_20250305', name: 'web_search' }],
       messages: [{ role: 'user', content: prompt }]
     })
   });
 
-  if (!response.ok) throw new Error('API error ' + response.status);
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error('API error ' + response.status + ': ' + errText.slice(0, 200));
+  }
   const data = await response.json();
 
-  // Extract JSON from response
+  // Extract all text blocks
   let jsonStr = '';
   for (const block of data.content) {
-    if (block.type === 'text') {
-      jsonStr += block.text;
-    }
+    if (block.type === 'text') jsonStr += block.text;
   }
 
-  // Clean and parse
-  jsonStr = jsonStr.replace(/```json|```/g, '').trim();
-  // Find the JSON object
+  // Strip markdown fences
+  jsonStr = jsonStr.replace(/```json\s*/gi, '').replace(/```\s*/gi, '').trim();
+
+  // Extract outermost JSON object
   const start = jsonStr.indexOf('{');
-  const end = jsonStr.lastIndexOf('}');
-  if (start === -1 || end === -1) throw new Error('No valid JSON in response');
+  if (start === -1) throw new Error('No JSON found in response');
+  
+  // Find matching closing brace
+  let depth = 0, end = -1;
+  for (let i = start; i < jsonStr.length; i++) {
+    if (jsonStr[i] === '{') depth++;
+    else if (jsonStr[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
+  }
+  if (end === -1) throw new Error('Incomplete JSON response — try refreshing');
+  
   jsonStr = jsonStr.slice(start, end + 1);
 
-  return JSON.parse(jsonStr);
+  try {
+    return JSON.parse(jsonStr);
+  } catch(e) {
+    // Last resort: try to salvage by truncating at last complete team entry
+    throw new Error('JSON parse failed: ' + e.message + ' — try refreshing');
+  }
 }
 
 function calcActualPts(teamData) {
